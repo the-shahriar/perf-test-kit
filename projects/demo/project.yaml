@@ -1,0 +1,158 @@
+# Demo project: an in-memory orders API (demo_api.py in this folder).
+# Start it with `python projects/demo/demo_api.py`, then:
+#   python perfkit.py check demo
+#   python perfkit.py setup demo
+#   python perfkit.py run demo smoke --run-id demo-smoke
+#
+# Read this file next to docs/CONFIG.md: it uses most of the options.
+
+project:
+  name: Demo Orders API
+  owner: QA
+
+default_target: local
+targets:
+  local:
+    base_url: http://127.0.0.1:8765
+    api_prefix: /api
+    health: /health
+    facts:
+      hosting: demo_api.py on this machine (Python ThreadingHTTPServer)
+
+auth:
+  type: login
+  per_minute: null                      # the demo API has no sign-in rate limit
+  login:
+    method: POST
+    path: /login
+    body: {username: "{{user.username}}", password: "{{user.password}}"}
+    token: token                        # where the token is in the JSON response
+  check: {method: GET, path: /me}       # validates a session before every run
+  logout: {method: POST, path: /logout, expect: [204]}
+  admin:
+    email: admin                        # literal credentials are fine for a demo; use *_env for real systems
+    password: admin-pass
+
+users:
+  count: 30
+  username: "user{n:03d}"
+  password: demo-pass
+
+think_time: [1, 2]                     # seconds between journey steps
+
+pools:
+  statuses: [Open, In Progress, Shipped, Delivered, Cancelled]
+  surnames: [Haddad, Mansour, Khoury, Nasser, Saleh, Rahman, Aziz, Hamdan, Qasim, Najjar]
+
+cases:
+  D-01:
+    label: Dashboard
+    method: GET
+    path: /dashboard
+  D-02:
+    label: List orders (first page)
+    method: GET
+    path: /orders
+    query: {limit: 50}
+    extract: {next_offset: next_offset}
+  D-03:
+    label: List orders (next page)
+    method: GET
+    path: /orders
+    query: {limit: 50, offset: "{{var.next_offset}}"}
+    requires: [next_offset]
+    extract: {next_offset: next_offset}
+    standalone:
+      before: [{case: D-02}]            # alone, it first needs a page cursor
+  D-04:
+    label: Filter and sort
+    method: GET
+    path: /orders
+    query: {status: "{{pick:statuses}}", min_amount: 1000, sort: -amount, limit: 50}
+  D-05:
+    label: Search by customer
+    method: GET
+    path: /orders
+    query: {q: "{{pick:surnames}}", limit: 50}
+  D-06:
+    label: Order detail
+    method: GET
+    path: /orders/{{var.id}}
+    extract: {version: version}
+    standalone:
+      set: {id: "{{pick:records}}"}
+  D-07:
+    label: Create order
+    method: POST
+    path: /orders
+    expect: [201]
+    body:
+      ref: "K6-{{seq}}"                 # after_run removes K6-* records, so every run starts at the same size
+      customer: "Load {{pick:surnames}}"
+      status: "{{pick:statuses}}"
+      amount: "{{float:5:25000:2}}"
+      quantity: "{{int:1:500}}"
+      created: "{{today}}"
+  D-08:
+    label: Update order
+    method: PATCH
+    path: /orders/{{var.id}}
+    body: {status: "{{pick:statuses}}", version: "{{var.version}}"}
+    requires: [version]
+    single_user: true
+    standalone:
+      set: {id: "{{pick:records}}"}
+      before: [{case: D-06}]            # read it first for the current version
+  D-09:
+    label: Export (queued job)
+    method: POST
+    path: /exports
+    body: {status: Open}
+    expect: [202]
+    extract: {export_id: id}
+    poll:
+      path: /exports/{{var.export_id}}
+      until: status
+      done: [completed]
+      failed: [failed]
+      interval_seconds: 0.25
+
+journey:
+  steps:
+    - cases: [D-01]
+    - case: D-02
+    - case: D-03
+      repeat: 2
+      while: next_offset
+    - case: D-04
+    - case: D-05
+    - set: {id: "{{pick:records}}"}
+      case: D-06
+    - probability: 0.2
+      case: D-07
+    - probability: 0.2
+      set: {id: "{{pick:own_records}}"}   # each virtual user edits only its own slice
+      cases: [D-06, D-08]
+    - probability: 0.05
+      case: D-09
+
+slo:                                    # optional; remove to get reports without pass/fail
+  p95_ms: 500
+  error_rate: 0.01
+  cases:
+    D-09: {p95_ms: 200}
+
+report:
+  organisation: Demo Org
+  prepared_for: QA team
+  doc_prefix: DEMO-PT
+  accent: "#2A78D6"
+
+tests:
+  smoke: {records: 1000}
+  performance: {records: 5000, iterations: 30}
+  load: {records: 5000, tiers: [1, 5, 10, 20], steady_seconds: 120}
+  stress: {records: 5000, tiers: [10, 25, 50, 100], steady_seconds: 60}
+  spike: {records: 5000, base_users: 2, peak_users: 30}
+  soak: {records: 5000, users: 10, steady_seconds: 600}
+  volume: {stages: [1000, 5000, 20000], users: [10], steady_seconds: 60}

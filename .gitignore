@@ -1,0 +1,11 @@
+# Per-target state: sessions, generated passwords, k6 inputs with tokens. Never commit.
+.state/
+# Raw samples and reports (large; share reports deliberately, not through git)
+results/
+# k6 binary
+tools/k6/*
+!tools/k6/.gitkeep
+__pycache__/
+*.pyc
+.env
+*.env

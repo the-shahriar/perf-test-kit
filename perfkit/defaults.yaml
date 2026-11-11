@@ -1,0 +1,120 @@
+# Kit defaults. A project's project.yaml is merged over this file, and the
+# selected target's section is merged over the result. Every key here can be
+# overridden; see docs/CONFIG.md for what each one means.
+
+api_prefix: ""
+tls_verify: true
+timeout: 120s            # per request, k6 duration syntax
+random_seed: 20260101
+headers: {}              # sent with every request
+response:
+  unwrap: null           # e.g. "data" when the API wraps payloads as {"data": ...}
+
+auth:
+  type: none             # none | login | token
+  header: Authorization
+  format: "Bearer {token}"
+  per_minute: null       # pace sign-ins (login rate limits)
+  admin: {}
+  login: null
+  check: null
+  logout: null
+
+users:
+  count: 10
+
+pacing:
+  admin_writes_per_minute: null
+
+vars: {}
+pools: {}
+datasets:
+  default: {}
+
+monitoring:
+  interval_seconds: 5
+  docker: {}
+  database: null
+
+report:
+  organisation: ""
+  prepared_for: ""
+  classification: "Internal"
+  doc_prefix: "PT"
+  accent: "#2A78D6"
+  logo: null
+  formats: [xlsx, html]
+
+slo: null
+
+# Test definitions. A project adds its own under `tests:`; a test whose name is
+# one of these types inherits the type's defaults below.
+tests:
+  smoke:
+    type: smoke
+    iterations: 2
+    users: 2
+    steady_seconds: 30
+    login_samples: 2
+
+  performance:
+    type: performance
+    cases: all
+    iterations: 50
+    warmup: 5
+    login_samples: 10
+    records: null          # seed the dataset to this count first (needs the seed_to hook)
+
+  load:
+    type: load
+    tiers: [1, 5, 10, 20, 50]
+    ramp_up_seconds: 60
+    steady_seconds: 300
+    ramp_down_seconds: 30
+    cooldown_seconds: 60
+    records: null
+
+  stress:
+    type: stress
+    tiers: [10, 25, 50, 100, 150, 200, 300]
+    ramp_up_seconds: 60
+    steady_seconds: 180
+    ramp_down_seconds: 30
+    cooldown_seconds: 60
+    stop_when:
+      error_rate: 0.10     # stop climbing once a tier fails more than 10% of requests
+      p95_ms: 10000        # ... or its p95 exceeds 10 s
+    records: null
+
+  spike:
+    type: spike
+    base_users: 5
+    peak_users: 100
+    ramp_up_seconds: 30
+    baseline_seconds: 120
+    spike_ramp_seconds: 10
+    spike_seconds: 120
+    recovery_seconds: 180
+    records: null
+
+  soak:
+    type: soak
+    users: 20
+    ramp_up_seconds: 60
+    steady_seconds: 7200
+    ramp_down_seconds: 30
+    windows: 6             # the report compares the steady phase in this many equal windows
+    records: null
+
+  volume:
+    type: volume
+    dataset: default
+    stages: [1000, 10000, 50000, 100000]
+    cases: read
+    iterations: 30
+    warmup: 2
+    users: [50]
+    ramp_up_seconds: 30
+    steady_seconds: 300
+    ramp_down_seconds: 30
+    cooldown_seconds: 60

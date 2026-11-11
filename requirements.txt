@@ -1,0 +1,7 @@
+# perf-test-kit (Python 3.11+). k6 is a separate binary: see docs/SETUP.md.
+pyyaml>=6
+requests>=2.31
+psutil>=5.9
+openpyxl>=3.1
+pillow>=10           # only for a logo on the Excel cover
+psycopg2-binary>=2.9 # only when monitoring.database is configured (PostgreSQL)

@@ -1,0 +1,98 @@
+# perf-test-kit project. Fill in the sections marked TODO, then:
+#   python perfkit.py show <project>     # what will be tested
+#   python perfkit.py check <project>    # can it reach and sign in?
+# Full reference: docs/CONFIG.md. A complete working example: projects/demo.
+
+project:
+  name: My Project
+  # repo: ../../path/to/the/application/repo   # optional: puts the tested commit in the reports
+
+default_target: local
+targets:
+  local:                                  # TODO: where the system under test runs
+    base_url: http://127.0.0.1:8000
+    api_prefix: /api                      # prepended to every case path
+    health: /health                       # any cheap URL; used by check and for latency
+  # staging:
+  #   base_url: https://staging.example.com
+  #   api_prefix: /api
+  #   allowed_hosts: [staging.example.com] # REQUIRED for any non-local host
+  #   facts: {hosting: "...", approved_by_and_window: "..."}
+
+response:
+  unwrap: null                            # e.g. data, if the API returns {"data": ...}
+
+auth:                                     # TODO: pick one
+  type: none                              # none | login | token
+  # --- type: login ---
+  # per_minute: 10                        # stay under the sign-in rate limit
+  # login:
+  #   method: POST
+  #   path: /auth/login
+  #   body: {email: "{{user.email}}", password: "{{user.password}}"}
+  #   token: access_token                 # dotted path to the token in the JSON response
+  # check: {method: GET, path: /auth/me}  # optional: validates sessions before each run
+  # logout: {method: POST, path: /auth/logout}
+  # header: Authorization
+  # format: "Bearer {token}"
+  # admin: {email_env: PERF_ADMIN_EMAIL, password_env: PERF_ADMIN_PASSWORD}   # for hooks that create data
+  # --- type: token ---
+  # tokens_env: PERF_TOKENS               # comma- or newline-separated, one per virtual user
+
+users:
+  count: 10
+  # email: "loadtest{n:03d}@example.com"  # numbered accounts that already exist
+  # password_env: PERF_USER_PASSWORD
+  # file: users.csv                       # or a CSV/JSON with email,password columns
+
+think_time: [1, 3]                        # seconds between journey steps
+
+pools:                                    # value lists for {{pick:<pool>}}
+  terms: [alpha, beta, gamma]
+
+cases:                                    # TODO: the operations to measure
+  C-01:
+    label: Home page data
+    method: GET
+    path: /health
+  # C-02:
+  #   label: Search
+  #   method: GET
+  #   path: /items
+  #   query: {q: "{{pick:terms}}", limit: 50}
+  # C-03:
+  #   label: Item detail
+  #   method: GET
+  #   path: /items/{{var.id}}
+  #   standalone: {set: {id: "{{pick:records}}"}}   # `records` comes from the record_ids hook
+  # C-04:
+  #   label: Create item
+  #   method: POST
+  #   path: /items
+  #   body: {name: "load-{{seq}}", qty: "{{int:1:100}}"}
+  #   expect: [201]
+
+journey:                                  # what one concurrent user does, repeated
+  steps:
+    - case: C-01
+    # - case: C-02
+    # - set: {id: "{{pick:records}}"}
+    #   case: C-03
+    # - probability: 0.2
+    #   case: C-04
+
+# slo:                                    # optional pass/fail in reports
+#   p95_ms: 1000
+#   error_rate: 0.01
+
+report:
+  organisation: ""
+  prepared_for: ""
+  doc_prefix: PT
+  accent: "#2A78D6"
+  # logo: logo.png
+
+tests:                                    # override any test type's defaults (perfkit/defaults.yaml)
+  load: {tiers: [1, 5, 10, 25], steady_seconds: 300}
+  # performance: {iterations: 50, records: 10000}   # `records` needs the seed_to hook
+  # volume: {stages: [1000, 10000, 100000], users: [25]}

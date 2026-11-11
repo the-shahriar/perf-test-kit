@@ -1,0 +1,318 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Sample project.yaml: a typical REST API (orders and products, JWT sign-in,
+# cursor pagination, a queued report job).
+#
+# Copy it to projects/<your-project>/project.yaml and replace the paths, fields
+# and numbers with your API's. Every key is described in docs/CONFIG.md.
+# Check what the kit understood with:  python perfkit.py show <your-project>
+# ─────────────────────────────────────────────────────────────────────────────
+
+project:
+  name: Shop Orders API
+  owner: Platform QA
+  repo: ../../../shop-orders-api            # optional: the app repo, so reports show the tested commit
+
+# ── Where the system runs ────────────────────────────────────────────────────
+default_target: local
+targets:
+  local:
+    base_url: http://127.0.0.1:8080
+    api_prefix: /api/v1
+    health: /health
+    monitoring:
+      docker:
+        containers: {api: shop_api, worker: shop_worker, db: shop_db}
+      database:
+        host: 127.0.0.1
+        port: 5432
+        name: shop
+        user: postgres
+        password_env: PERF_DB_PASSWORD
+        top_sql: reset                      # fine on a local database, not on a shared one
+        tables: [orders, order_lines, products]
+
+  staging:
+    base_url: https://staging-api.shop.example.com
+    api_prefix: /api/v1
+    health: /health
+    allowed_hosts: [staging-api.shop.example.com]   # required: unlisted hosts are refused
+    facts:                                          # printed in every report
+      hosting: AWS ECS Fargate, 2 tasks x 1 vCPU / 2 GB, RDS PostgreSQL db.t3.medium
+      region: ap-southeast-1
+      deployed_commit: "fill in on the day"
+      approved_by_and_window: "name, date, UTC window"
+    monitoring:
+      docker: {}                            # containers not reachable from the load generator
+      database:
+        host: staging-db.internal
+        port: 5432
+        name: shop
+        user_env: PERF_DB_USER              # a read-only login
+        password_env: PERF_DB_PASSWORD
+        sslmode: require
+        top_sql: read                       # read only: do not reset shared statistics
+        tables: [orders, order_lines]
+    allowed_db_hosts: [staging-db.internal]
+    users: {count: 50}                      # fewer accounts on staging
+    tests:
+      load: {tiers: [1, 10, 25, 50]}        # smaller tiers on staging
+
+# ── Requests ────────────────────────────────────────────────────────────────
+timeout: 60s
+random_seed: 20261111
+headers:
+  X-Client: perf-test-kit
+response:
+  unwrap: data                              # the API returns {"data": ..., "meta": ...}
+
+# ── Sign-in ─────────────────────────────────────────────────────────────────
+auth:
+  type: login
+  per_minute: 20                            # under the API's sign-in limit of 30/min per IP
+  login:
+    method: POST
+    path: /auth/token
+    body: {email: "{{user.email}}", password: "{{user.password}}"}
+    token: data.access_token                # dotted path into the JSON response
+  check: {method: GET, path: /me}           # sessions are validated before every run
+  logout: {method: POST, path: /auth/logout, expect: [204]}
+  header: Authorization
+  format: "Bearer {token}"
+  admin:                                    # used by hooks.py to create and seed data
+    email_env: PERF_ADMIN_EMAIL
+    password_env: PERF_ADMIN_PASSWORD
+
+# ── Test accounts (already exist; same password) ────────────────────────────
+users:
+  count: 100
+  email: "loadtest{n:03d}@shop.example.com"
+  password_env: PERF_USER_PASSWORD
+  fields: {store: "store-{n:02d}"}          # extra per-user fields, available as {{user.store}}
+
+pacing:
+  admin_writes_per_minute: 200
+
+think_time: [3, 6]                          # seconds between journey steps
+
+# ── Values the cases pick from ──────────────────────────────────────────────
+vars:
+  page_size: 50
+  store_id: $state.store_id                 # written by the setup hook
+
+pools:
+  statuses: [pending, paid, packed, shipped, delivered, cancelled]
+  search_terms: [shirt, phone, cable, lamp, chair, kettle, bottle, charger]
+  skus: [SKU-0001, SKU-0002, SKU-0003, SKU-0004, SKU-0005]
+
+datasets:
+  default:                                  # the live orders table
+    vars:
+      order_filter: {status: paid, min_total: 100}
+      new_order:
+        reference: "LT-{{seq}}"             # after_run removes LT-* orders after each run
+        sku: "{{pick:skus}}"
+        quantity: "{{int:1:5}}"
+        note: created by the load test
+  archive:                                  # a second dataset for an archive volume test
+    vars:
+      order_filter: {status: delivered, min_total: 0, archived: true}
+      new_order:
+        reference: "LT-{{seq}}"
+        sku: "{{pick:skus}}"
+        quantity: 1
+        archived: true
+
+# ── The operations to measure ───────────────────────────────────────────────
+cases:
+  APP-01:
+    label: Current user
+    method: GET
+    path: /me
+
+  APP-02:
+    label: Home dashboard
+    method: GET
+    path: /stores/{{ctx.store_id}}/dashboard
+
+  ORD-01:
+    label: Order list (first page)
+    method: GET
+    path: /stores/{{ctx.store_id}}/orders
+    query: {limit: "{{ctx.page_size}}"}
+    extract: {cursor: meta.next_cursor}
+
+  ORD-02:
+    label: Order list (next page)
+    method: GET
+    path: /stores/{{ctx.store_id}}/orders
+    query: {limit: "{{ctx.page_size}}", cursor: "{{var.cursor}}"}
+    requires: [cursor]                      # skipped when there is no next page
+    extract: {cursor: meta.next_cursor}
+    standalone:
+      before: [{case: ORD-01}]              # alone, fetch page 1 first (not measured)
+
+  ORD-03:
+    label: Filter orders
+    kind: read                              # a POST that only reads: keep it in `cases: read` runs
+    method: POST
+    path: /stores/{{ctx.store_id}}/orders/search
+    body:
+      filter: "{{ctx.order_filter}}"
+      sort: [{field: created_at, order: desc}]
+      limit: "{{ctx.page_size}}"
+
+  ORD-04:
+    label: Search orders by text
+    method: GET
+    path: /stores/{{ctx.store_id}}/orders
+    query: {q: "{{pick:search_terms}}", limit: "{{ctx.page_size}}"}
+
+  ORD-05:
+    label: Order detail
+    method: GET
+    path: /orders/{{var.order_id}}
+    extract: {etag: "header:ETag"}          # needed by the update
+    standalone:
+      set: {order_id: "{{pick:records}}"}   # `records` comes from the record_ids hook
+
+  ORD-06:
+    label: Order history
+    method: GET
+    path: /orders/{{var.order_id}}/events
+    query: {limit: 50}
+    standalone:
+      set: {order_id: "{{pick:records}}"}
+
+  ORD-07:
+    label: Create order
+    kind: write
+    method: POST
+    path: /stores/{{ctx.store_id}}/orders
+    body: "{{ctx.new_order}}"
+    expect: [201]
+
+  ORD-08:
+    label: Update order status
+    kind: write
+    method: PATCH
+    path: /orders/{{var.order_id}}
+    headers: {If-Match: "{{var.etag}}"}
+    body: {status: "{{pick:statuses}}"}
+    requires: [etag]
+    standalone:
+      set: {order_id: "{{pick:records}}"}
+      before: [{case: ORD-05}]              # read it first for the current ETag
+
+  PRD-01:
+    label: Product search
+    method: GET
+    path: /products
+    query: {q: "{{pick:search_terms}}", in_stock: true, limit: 20}
+
+  RPT-01:
+    label: Sales report (queued)
+    kind: read
+    method: POST
+    path: /stores/{{ctx.store_id}}/reports
+    body: {type: daily_sales, from: "{{date:-30}}", to: "{{today}}"}
+    expect: [202]
+    extract: {job_id: data.id}
+    poll:                                   # the report shows request time and time to completion
+      when_status: [202]
+      path: /jobs/{{var.job_id}}
+      until: data.state
+      done: [succeeded]
+      failed: [failed]
+      interval_seconds: 1
+      max_polls: 120
+
+# ── What one concurrent user does, repeated ─────────────────────────────────
+journey:
+  steps:
+    - cases: [APP-01, APP-02]               # sign-in landing: both calls, then think
+    - case: ORD-01
+    - case: ORD-02
+      repeat: 2
+      while: cursor
+    - case: ORD-03
+    - case: ORD-04
+    - set: {order_id: "{{pick:records}}"}
+      cases: [ORD-05, ORD-06]
+    - case: PRD-01
+    - probability: 0.15                     # 15% of iterations place an order
+      case: ORD-07
+    - probability: 0.10                     # 10% update one of this user's own orders
+      set: {order_id: "{{pick:own_records}}"}
+      cases: [ORD-05, ORD-08]
+    - probability: 0.02                     # 2% run a report
+      case: RPT-01
+
+# ── Targets (optional): adds pass/fail columns to the reports ───────────────
+slo:
+  p95_ms: 800
+  error_rate: 0.01
+  cases:
+    APP-02: {p95_ms: 1500}
+    RPT-01: {p95_ms: 500}                   # the request itself; completion time is reported separately
+
+# ── Report branding ─────────────────────────────────────────────────────────
+report:
+  organisation: Shop Platform Engineering
+  prepared_for: Head of Engineering
+  classification: Internal
+  doc_prefix: SHOP-PT
+  accent: "#0B6E4F"
+  # logo: logo.png                         # next to project.yaml
+  formats: [xlsx, html]
+
+# ── Tests: override the defaults in perfkit/defaults.yaml ───────────────────
+# `records`, `stages` and volume tests need seed_to and record_count in hooks.py.
+tests:
+  smoke:
+    records: 1000
+
+  performance:
+    records: 50000
+    iterations: 100
+    warmup: 5
+    login_samples: 20
+
+  load:
+    records: 50000
+    tiers: [1, 10, 25, 50, 100, 150]
+    ramp_up_seconds: 60
+    steady_seconds: 600
+    ramp_down_seconds: 30
+    cooldown_seconds: 120
+
+  stress:
+    records: 50000
+    tiers: [100, 150, 200, 300, 400, 500]
+    steady_seconds: 300
+    stop_when: {error_rate: 0.05, p95_ms: 5000}
+
+  spike:
+    records: 50000
+    base_users: 20
+    peak_users: 200
+    baseline_seconds: 180
+    spike_seconds: 180
+    recovery_seconds: 300
+
+  soak:
+    records: 50000
+    users: 50
+    steady_seconds: 14400                   # 4 hours
+    windows: 8
+
+  volume:
+    stages: [10000, 50000, 100000, 250000, 500000]
+    iterations: 30
+    users: [50]
+    steady_seconds: 300
+
+  archive-volume:                           # a named variant: volume on the archive dataset
+    type: volume
+    dataset: archive
+    stages: [100000, 1000000]
+    users: [10, 25]
